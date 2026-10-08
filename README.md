@@ -17,26 +17,57 @@
 无需安装任何依赖，直接用系统 Python 运行：
 
 ```bash
-python homework_organizer.py --help
+python main.py --help
+# 或者等价地（把仓库目录当包运行）
+python -m homework_organizer --help
 ```
 
 ## 快速开始
 
 ```bash
 # 1. 扫描某目录，只看 PDF / Word
-python homework_organizer.py scan ./作业 --ext .pdf .docx
+python main.py scan ./作业 --ext .pdf .docx
 
 # 2. 批量改名：学号_姓名_作业名.pdf → 作业名_学号.pdf（先预览，确认后才改）
-python homework_organizer.py rename ./作业 --fields 3,1
+python main.py rename ./作业 --fields 3,1
 
 # 3. 按学期归档到子目录，并生成整理报告
-python homework_organizer.py archive ./作业 --by semester
+python main.py archive ./作业 --by semester
 
 # 4. 后悔了？撤销上一次操作
-python homework_organizer.py undo ./作业
+python main.py undo ./作业
 ```
 
 > 所有会改动文件的操作（`rename` / `archive` / `undo`）**都会先打印将要执行的动作清单，再询问确认**——只有输入 `y` / `yes` 才真正执行；直接回车、输入其他字符、EOF、`Ctrl+C` 一律视为取消，不会改动任何文件。
+
+---
+
+## 项目结构
+
+```text
+homework-organizer/
+├── homework_organizer/        # 主程序包
+│   ├── __init__.py            # 版本号
+│   ├── __main__.py            # 支持 python -m homework_organizer
+│   ├── cli.py                 # 命令行入口：注册子命令、分发执行
+│   ├── utils.py               # 通用工具：大小 / 时间格式化、扩展名匹配、文件枚举、确认
+│   ├── journal.py             # 整理日志：读取、原子写入、追加记录
+│   ├── scan.py                # 需求 1：扫描与列出
+│   ├── rename.py              # 需求 2：批量改名
+│   ├── archive.py             # 需求 3：归档到子目录
+│   ├── report.py              # 整理报告：生成与查看
+│   └── undo.py                # 撤销上一次操作
+├── main.py                    # 启动器（等价于 python -m homework_organizer）
+├── README.md
+├── LICENSE
+└── .gitignore
+```
+
+各模块之间是**单向依赖**，不会出现循环导入：
+
+```text
+cli.py ──> scan / rename / archive / report / undo ──> journal.py ──> utils.py
+```
 
 ---
 
@@ -45,7 +76,7 @@ python homework_organizer.py undo ./作业
 ### 1. `scan` —— 扫描与列出
 
 ```bash
-python homework_organizer.py scan <目录> [--ext .pdf .docx]
+python main.py scan <目录> [--ext .pdf .docx]
 ```
 
 | 选项 | 说明 |
@@ -70,7 +101,7 @@ python homework_organizer.py scan <目录> [--ext .pdf .docx]
 ### 2. `rename` —— 批量改名
 
 ```bash
-python homework_organizer.py rename <目录> [--split _] [--fields 3,1] [--ext .pdf]
+python main.py rename <目录> [--split _] [--fields 3,1] [--ext .pdf]
 ```
 
 按分隔符把文件名切成若干段，再按 `--fields` 指定的顺序重排，扩展名保持不变：
@@ -93,7 +124,7 @@ python homework_organizer.py rename <目录> [--split _] [--fields 3,1] [--ext .
 ### 3. `archive` —— 归档到子目录 + 报告
 
 ```bash
-python homework_organizer.py archive <目录> [--by ext|semester|keyword] [--keyword-map "数学=Math;英语=English"]
+python main.py archive <目录> [--by ext|semester|keyword] [--keyword-map "数学=Math;英语=English"]
 ```
 
 | 选项 | 说明 |
@@ -108,7 +139,7 @@ python homework_organizer.py archive <目录> [--by ext|semester|keyword] [--key
 ### 4. `report` —— 查看整理报告
 
 ```bash
-python homework_organizer.py report <目录> [--all]
+python main.py report <目录> [--all]
 ```
 
 每次 `rename` / `archive` 都会把结果记录到该目录下的 `.organizer_log.json`。`report` 默认显示最近一次操作，`--all` 显示全部历史记录：**处理了多少、跳过多少、为什么跳过**。
@@ -116,7 +147,7 @@ python homework_organizer.py report <目录> [--all]
 ### 5. `undo` —— 撤销上一次操作
 
 ```bash
-python homework_organizer.py undo <目录>
+python main.py undo <目录>
 ```
 
 把最近一次 `rename` / `archive` 的改动**原样还原**（把文件移回原来的位置），随后该条记录从日志中移除。可以连续执行，逐次往前回退。
@@ -155,21 +186,23 @@ python homework_organizer.py undo <目录>
 - **可回退**：每次改动都写入本地日志 `.organizer_log.json`，`undo` 一键还原。
 - **单项失败不影响整体**：某个文件读不了、改不了、移不了，只跳过它并记录原因，命令继续处理其余文件。
 
-## 开发说明（3 个 PR）
+## 开发说明（3 个需求 PR + 1 个重构 PR）
 
-本项目按三个需求拆分为 3 个分支，每个分支对应一个需求、各开一个 PR，保证每个 PR 的改动只包含该需求的内容：
+本项目按三个需求拆分为 3 个分支，每个分支对应一个需求、各开一个 PR，保证每个 PR 的改动只包含该需求的内容；三个需求都合并后，再开一条分支把单文件实现重构为包结构：
 
-| 分支 | 对应需求 | 合并到 |
+| 分支 | 内容 | 合并到 |
 | --- | --- | --- |
 | `feature/1-scan` | 需求 1：扫描与列出（`scan`） | `main` |
 | `feature/2-rename` | 需求 2：批量改名（`rename`） | `feature/1-scan` |
 | `feature/3-archive` | 需求 3：归档与报告（`archive` / `report` / `undo`） | `feature/2-rename` |
+| `refactor/package-layout` | 重构：单文件拆分为 `homework_organizer/` 包 + `main.py` 启动器（纯结构调整，功能与用法不变） | `main` |
 
-> 合并顺序：按 1 → 2 → 3 依次合并；每合并一个 PR 后删除对应的 feature 分支，GitHub 会自动把下一个 PR 的目标分支指向 `main`，这样三个 PR 的 diff 始终各自对应一个需求。
+> 合并顺序：按需求 1 → 2 → 3 依次合并，最后合并重构 PR；每合并一个 PR 后删除对应分支，GitHub 会自动把下一个 PR 的目标分支指向 `main`。
 
 主要提交历史（`git log --oneline`）：
 
 ```text
+c0c4d80 refactor: 单文件拆分为 homework_organizer 包结构，新增 main.py 启动器
 94e7dd9 feat(archive): 需求3 - 按学期/类别归档、生成整理报告、支持撤销上次操作
 0ca2414 feat(rename): 需求2 - 批量改名，先预览确认后执行，重名冲突绝不覆盖
 3cce451 feat(scan): 需求1 - 扫描目录列出文件，支持大小/修改时间与扩展名过滤
