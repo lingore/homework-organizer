@@ -155,6 +155,40 @@ python homework_organizer.py undo <目录>
 - **可回退**：每次改动都写入本地日志 `.organizer_log.json`，`undo` 一键还原。
 - **单项失败不影响整体**：某个文件读不了、改不了、移不了，只跳过它并记录原因，命令继续处理其余文件。
 
+## 开发说明（3 个 PR）
+
+本项目按三个需求拆分为 3 个分支，每个分支对应一个需求、各开一个 PR，保证每个 PR 的改动只包含该需求的内容：
+
+| 分支 | 对应需求 | 合并到 |
+| --- | --- | --- |
+| `feature/1-scan` | 需求 1：扫描与列出（`scan`） | `main` |
+| `feature/2-rename` | 需求 2：批量改名（`rename`） | `feature/1-scan` |
+| `feature/3-archive` | 需求 3：归档与报告（`archive` / `report` / `undo`） | `feature/2-rename` |
+
+> 合并顺序：按 1 → 2 → 3 依次合并；每合并一个 PR 后删除对应的 feature 分支，GitHub 会自动把下一个 PR 的目标分支指向 `main`，这样三个 PR 的 diff 始终各自对应一个需求。
+
+主要提交历史（`git log --oneline`）：
+
+```text
+94e7dd9 feat(archive): 需求3 - 按学期/类别归档、生成整理报告、支持撤销上次操作
+0ca2414 feat(rename): 需求2 - 批量改名，先预览确认后执行，重名冲突绝不覆盖
+3cce451 feat(scan): 需求1 - 扫描目录列出文件，支持大小/修改时间与扩展名过滤
+77ccd18 docs: 添加 MIT 许可证
+79f9f80 docs: 初始化仓库，添加 README 与 .gitignore
+```
+
+## 推送到 GitHub 并创建 PR
+
+```bash
+# 1) 关联远程仓库
+git remote add origin https://github.com/<你的用户名>/homework-organizer.git
+
+# 2) 推送 main 与 3 个 feature 分支
+git push -u origin main feature/1-scan feature/2-rename feature/3-archive
+```
+
+推送完成后，到 GitHub 网页上依次创建 3 个 PR（head / base 见上表），再按 1 → 2 → 3 的顺序合并。
+
 ## 许可证
 
 MIT
