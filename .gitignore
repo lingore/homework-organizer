@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时产生的整理日志（报告 / 撤销依赖它，属于本地状态，不入库）
+.organizer_log.json
+.organizer_log.json.tmp
+.organizer_log.json.bad-*
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
