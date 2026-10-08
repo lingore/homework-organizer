@@ -4,13 +4,18 @@
 子命令：
   scan    扫描目录、列出文件（大小 / 修改时间），支持按扩展名过滤
   rename  按规则批量改名（先打印预览，确认后才执行，自动处理重名冲突）
+  archive 按学期 / 类别把文件移动到子目录，并生成整理报告
+  report  查看整理报告（处理 / 跳过统计）
+  undo    撤销上一次操作
 示例：
   python homework_organizer.py scan   ./作业 --ext .pdf .docx
   python homework_organizer.py rename ./作业 --fields 3,1
+  python homework_organizer.py archive ./作业 --by semester
 """
 import argparse
 import json
 import os
+import shutil
 import stat       # cmd_scan 用 stat.S_ISREG 判断普通文件
 import sys
 from datetime import datetime
@@ -384,6 +389,232 @@ def cmd_rename(args) -> int:
     print(build_report("rename", root, items))
     return 0
 
+# 需求 3：归档、报告、撤销
+
+def semester_of(ts: float) -> str:
+    """按修改时间推断学期：1-6 月为春、7-12 月为秋，如 '2024-春'。"""
+    dt = datetime.fromtimestamp(ts)
+    return f"{dt.year}-{'春' if dt.month <= 6 else '秋'}"
+
+
+def parse_keyword_map(text: str) -> dict:
+    """解析 '关键词=目录;关键词2=目录2'，如 '数学=Math;英语=English'。"""
+    mapping = {}
+    for part in (text or "").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise SystemExit(f"[错误] --keyword-map 格式应为 '关键词=目录;...'，收到：{part!r}")
+        key, val = part.split("=", 1)
+        key, val = key.strip(), val.strip()
+        if key and val:
+            mapping[key] = val
+    if not mapping:
+        raise SystemExit("[错误] --keyword-map 为空。")
+    return mapping
+
+
+def safe_folder(name: str) -> bool:
+    """目录名合法性校验：拒绝 '..' 与路径分隔符，防止路径遍历攻击。"""
+    return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
+
+
+def classify(p: Path, by: str, kw_map: dict) -> str:
+    """根据归档依据返回子目录名；无法归类时返回空字符串 ''。"""
+    if by == "ext":
+        return ext_of(p.name).lstrip(".") or "无扩展名"   # 按扩展名：pdf → 'pdf'
+    if by == "semester":
+        try:
+            return semester_of(p.stat().st_mtime)         # 按修改时间：'2025-春'
+        except OSError:                                   # 文件刚被删 / 不可读 → 视为无法归类
+            return ""
+    if by == "keyword":
+        low = p.name.lower()
+        for keyword, folder in kw_map.items():            # 按文件名关键词：先命中先归类
+            if keyword.lower() in low:
+                return folder
+        return ""                                          # 无关键词命中 → 无法归类
+    return ""
+
+
+def plan_archive(root: Path, files, by: str, kw_map: dict) -> list:
+    """计算归档计划（只计划，不动文件），并对每个子目录做重名检测。"""
+    occupied = {}          # 子目录名 -> 该目录下已存在的文件名集合
+    plans = []
+    for src in files:
+        folder = classify(src, by, kw_map)
+        if not folder or not safe_folder(folder):          # 无法归类 / 非法目录名 → 跳过
+            reason = "无法确定类别" if not folder else f"非法目录名：{folder}"
+            plans.append({"from": src.name, "to": "", "status": "skipped",
+                          "reason": reason})
+            continue
+
+        target_dir = root / folder
+        # 首次处理某个子目录时，把它里面已有的文件名登记为占用（防覆盖），
+        # 之后直接复用缓存，避免同一个子目录被反复扫描
+        names = occupied.get(folder)
+        if names is None:
+            names = ({fname_key(p.name) for p in target_dir.iterdir() if p.is_file()}
+                     if target_dir.is_dir() else set())
+            occupied[folder] = names
+
+        if fname_key(src.name) in names:                   # 目标目录里已有同名文件 → 跳过
+            plans.append({"from": src.name, "to": f"{folder}/{src.name}",
+                          "status": "skipped",
+                          "reason": f"重名冲突：{folder}/{src.name}"})
+            continue
+        names.add(fname_key(src.name))                     # 登记，防止同目录内再撞
+        plans.append({"from": src.name, "to": f"{folder}/{src.name}",
+                      "status": "moved", "reason": ""})
+    return plans
+
+
+def cmd_archive(args) -> int:
+    """按类别 / 学期 / 扩展名把文件移动到子目录，并生成整理报告。"""
+    root = Path(args.path).expanduser()
+    if not root.is_dir():
+        print(f"[错误] 目录不存在：{root}", file=sys.stderr)
+        return 1
+
+    kw_map = parse_keyword_map(args.keyword_map) if args.by == "keyword" else {}
+    files = iter_files(root)
+    plans = plan_archive(root, files, args.by, kw_map)
+
+    # ---- 1) 打印预览 ----
+    moved = [p for p in plans if p["status"] == "moved"]
+    skipped = [p for p in plans if p["status"] == "skipped"]
+    if moved:
+        print("将要移动的文件：")
+        for p in moved:
+            print(f"  {p['from']}  →  {p['to']}")
+    if skipped:
+        print("\n将跳过的文件：")
+        for p in skipped:
+            print(f"  {p['from']}  ({p['reason']})")
+    if not moved:
+        print("没有需要归档的文件。")
+        return 0
+
+    # ---- 2) input() 等待确认 ----
+    if not confirm("确认执行以上归档？"):
+        print("已取消，未做任何修改。")
+        return 0
+
+    # ---- 3) 执行移动，逐个捕获异常（单个失败不中断整体） ----
+    failed = {}
+    for p in moved:
+        dst = root / p["to"]
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)   # 先确保子目录存在
+            shutil.move(str(root / p["from"]), str(dst))    # 移动文件
+        except OSError as e:                                # 权限等错误 → 记为失败
+            failed[p["from"]] = str(e)
+
+    # 把「实际结果」写进日志：成功→done，失败/跳过→skipped（带原因）
+    items = []
+    for p in plans:
+        if p["status"] == "moved":
+            if p["from"] in failed:
+                items.append({"action": "move", "status": "skipped",
+                              "from": p["from"], "to": p["to"],
+                              "reason": f"移动失败：{failed[p['from']]}"})
+            else:
+                items.append({"action": "move", "status": "done",
+                              "from": p["from"], "to": p["to"]})
+        else:
+            items.append({"action": "move", "status": "skipped",
+                          "from": p["from"], "to": "", "reason": p["reason"]})
+
+    append_log(root, "archive", items)
+    print()
+    print(build_report("archive", root, items))      # 生成整理报告
+    return 0
+
+
+def cmd_report(args) -> int:
+    """查看整理报告（默认最近一次，--all 显示全部）。"""
+    root = Path(args.path).expanduser()
+    if not root.is_dir():
+        print(f"[错误] 目录不存在：{root}", file=sys.stderr)
+        return 1
+    ops = load_log(root)
+    if not ops:
+        print("没有整理记录(该目录下还没执行过 rename / archive)。")
+        return 0
+    selected = ops if args.all else ops[-1:]         # 默认只显示最近一次
+    for op in selected:
+        print(build_report(op["command"], root, op["items"], op.get("time", "")))
+    return 0
+
+
+def cmd_undo(args) -> int:
+    """撤销上次操作：读取日志里最近一次操作，把每个 done 条目反向移动回去。"""
+    root = Path(args.path).expanduser()
+    if not root.is_dir():
+        print(f"[错误] 目录不存在：{root}", file=sys.stderr)
+        return 1
+    ops = load_log(root)
+    if not ops:
+        print("没有可撤销的操作。")
+        return 0
+
+    op = ops[-1]                                      # 最近一次操作
+    done = [i for i in op["items"] if i["status"] == "done"]
+    if not done:
+        print(f"上次操作「{op['command']}」没有实际改动，已从日志移除。")
+        try:
+            save_log(root, ops[:-1])
+        except OSError as e:
+            print(f"[警告] 日志写入失败：{e}", file=sys.stderr)
+        return 0
+
+    # ---- 打印将撤销的动作 ----
+    print(f"将撤销操作「{op['command']}」（{op.get('time', '')}）：")
+    for i in done:
+        print(f"  {i['to']}  ←  {i['from']}")         # to 是现在位置，from 是原来位置
+
+    if not confirm("确认撤销？"):
+        print("已取消。")
+        return 0
+
+    # ---- 反向移动：把文件从 'to' 移回 'from' ----
+    restored, failed = 0, []
+    for i in done:
+        src = root / i["to"]                          # 文件现在所在位置
+        dst = root / i["from"]                        # 文件原来位置
+        if not src.exists():                          # 文件已经不在 → 无法撤销
+            failed.append((i, "源文件已不存在（可能已被手动移动）"))
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True) # 确保原目录存在
+        if dst.exists():                              # 原位已有文件 → 绝不覆盖
+            failed.append((i, "目标位置已存在（避免覆盖，跳过）"))
+            continue
+        try:
+            shutil.move(str(src), str(dst))           # 移回原位
+            restored += 1
+        except OSError as e:                          # 权限等错误兜底
+            failed.append((i, f"移动失败：{e}"))
+
+    # 注：撤销只把文件移回原位，不删除遗留的空子目录
+    if failed:                                         # 有未还原的：保留这些条目，下次 undo 可重试
+        op["items"] = [i for i, _ in failed]
+        try:
+            save_log(root, ops)
+        except OSError as e:
+            print(f"[警告] 日志写入失败：{e}", file=sys.stderr)
+        print(f"\n撤销部分完成：还原 {restored} 个，{len(failed)} 个未还原"
+              f"（已保留在日志中，可再次 undo 重试）。")
+    else:                                              # 全部还原 → 移除这条日志
+        try:
+            save_log(root, ops[:-1])
+        except OSError as e:
+            print(f"[警告] 日志写入失败：{e}", file=sys.stderr)
+        print(f"\n撤销完成：还原 {restored} 个。")
+    for i, reason in failed:
+        print(f"  - 未还原 {i['to']}：{reason}")
+    return 0
+
 # CLI 入口
 
 def build_parser() -> argparse.ArgumentParser:
@@ -402,6 +633,22 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--fields", default="3,1", help="保留字段序号，如 3,1（默认 3,1）")
     r.add_argument("--ext", nargs="*", default=None, help="只处理这些扩展名")
     r.set_defaults(func=cmd_rename)
+
+    a = sub.add_parser("archive", help="按类别 / 学期 / 扩展名归档到子目录")
+    a.add_argument("path", help="要处理的目录")
+    a.add_argument("--by", choices=["ext", "semester", "keyword"], default="ext",
+                   help="归档依据（默认 ext）")
+    a.add_argument("--keyword-map", help="--by keyword 时：'关键词=目录;...'")
+    a.set_defaults(func=cmd_archive)
+
+    rep = sub.add_parser("report", help="查看整理报告")
+    rep.add_argument("path", help="要查看的目录")
+    rep.add_argument("--all", action="store_true", help="显示全部历史记录（默认最近一次）")
+    rep.set_defaults(func=cmd_report)
+
+    u = sub.add_parser("undo", help="撤销上次操作")
+    u.add_argument("path", help="要处理的目录")
+    u.set_defaults(func=cmd_undo)
 
     return p
 
